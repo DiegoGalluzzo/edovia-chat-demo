@@ -465,7 +465,7 @@ app.post("/chat", async (req, res) => {
         "────────────────────────────────────────\n\n";
 
       const cta =
-        "Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, [[CREA_UN_ACCOUNT]]";
+        "Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, crea un account Edovia [[CREA_UN_ACCOUNT]]";
 
       const reply = header + cards.join("\n\n") + "\n\n" + cta;
 
