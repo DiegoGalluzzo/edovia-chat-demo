@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = process.env.PORT || 3001;
 
-// Configura OpenAI: la chiave va in OPENAI_API_KEY (env su Render)
+// OpenAI: chiave in OPENAI_API_KEY (Render env)
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
@@ -19,7 +19,7 @@ const client = new OpenAI({
 app.use(cors());
 app.use(express.json());
 
-// memoria in RAM per conteggio messaggi per sessione (ok per demo)
+// Conteggio messaggi per sessione (demo)
 const sessions = new Map();
 const MAX_MESSAGES_FREE = 20;
 
@@ -57,7 +57,7 @@ function comparePrograms({ countryCode, budget, weeks }) {
     .sort((a, b) => a.total - b.total);
 }
 
-// prova a capire se il messaggio chiede una comparazione (budget + paese)
+// Estrae intento di comparazione: budget + paese
 function parseIntentForComparison(message) {
   const lower = message.toLowerCase();
 
@@ -78,7 +78,7 @@ function parseIntentForComparison(message) {
     countryCode = "canada";
   }
 
-  const weeks = 24; // per ora assumiamo "semestre" = 24 settimane
+  const weeks = 24; // per ora: semestre = 24 settimane
 
   if (!budget || !countryCode) {
     return null;
@@ -99,7 +99,7 @@ app.post("/chat", async (req, res) => {
         .json({ error: "sessionId e message sono obbligatori" });
     }
 
-    // conteggio messaggi per sessionId
+    // Limite messaggi free per sessione
     const current = sessions.get(sessionId) || 0;
     if (current >= MAX_MESSAGES_FREE) {
       return res.json({
@@ -107,12 +107,12 @@ app.post("/chat", async (req, res) => {
         reply:
           "Hai usato tutte le domande gratuite per esplorare i programmi. " +
           "Per salvare questa comparazione e continuare senza limiti, CREA UN ACCOUNT Edovia.",
-        ctaUrl: "" // per ora nessun link, solo testo
+        ctaUrl: "" // per ora nessun link
       });
     }
     sessions.set(sessionId, current + 1);
 
-    // 1) Se il messaggio contiene budget + paese, prova a usare il comparatore
+    // 1) Se messaggio contiene budget + paese, usa comparatore
     const comparisonIntent = parseIntentForComparison(message);
     if (comparisonIntent) {
       const { budget, countryCode, weeks } = comparisonIntent;
@@ -120,8 +120,9 @@ app.post("/chat", async (req, res) => {
 
       if (programs.length) {
         const countryLabel = countryCode === "us" ? "USA" : "Canada";
+        const flag = countryCode === "us" ? "🇺🇸" : "🇨🇦";
 
-        // calcola un punteggio di match budget-based
+        // Punteggio di match basato sul budget
         function matchScore(total, budget) {
           const diff = total - budget;
           if (diff <= 0) return 5.0;
@@ -136,7 +137,7 @@ app.post("/chat", async (req, res) => {
         function stars(score) {
           const full = Math.floor(score);
           const empty = 5 - full;
-          return "⭐".repeat(full) + "☆".repeat(empty);
+          return "★".repeat(full) + "☆".repeat(empty);
         }
 
         function bar(score) {
@@ -147,68 +148,76 @@ app.post("/chat", async (req, res) => {
           return filled + empty;
         }
 
-        function badges(p, score) {
+        function badgeArray(p, score) {
           const result = [];
 
-          // badge budget
+          // budget
           if (p.fitsBudget) {
-            result.push("💶 Budget ok");
+            result.push("[Budget ok]");
           } else {
-            result.push("💶 Sopra il budget");
+            result.push("[Sopra budget]");
           }
 
-          // badge stile/contesto molto semplice
           const cityLower = (p.city || "").toLowerCase();
           if (cityLower.includes("boston") || cityLower.includes("new york")) {
-            result.push("🎓 Focus accademico");
+            result.push("[Focus accademico]");
           }
-          if (cityLower.includes("los angeles") || cityLower.includes("san diego") || cityLower.includes("vancouver")) {
-            result.push("🌴 Lifestyle & outdoor");
+          if (
+            cityLower.includes("los angeles") ||
+            cityLower.includes("san diego") ||
+            cityLower.includes("vancouver")
+          ) {
+            result.push("[Lifestyle & outdoor]");
           }
           if (cityLower.includes("toronto")) {
-            result.push("🏙️ Città grande");
+            result.push("[Grande città]");
           }
 
-          // badge match
+          // match
           if (score >= 4.5) {
-            result.push("✅ Match molto alto");
+            result.push("[Match molto alto]");
           } else if (score >= 4.0) {
-            result.push("✅ Buon match");
+            result.push("[Buon match]");
           } else if (score >= 3.5) {
-            result.push("⚖️ Compromesso budget");
+            result.push("[Compromesso budget]");
           } else {
-            result.push("⚠️ Usa come riferimento");
+            result.push("[Usa come riferimento]");
           }
 
-          return result.join(" · ");
+          return result;
         }
 
-        const lines = programs.slice(0, 3).map((p, index) => {
+        const cards = programs.slice(0, 3).map((p, index) => {
           const score = matchScore(p.total, budget);
+          const tags = badgeArray(p, score);
 
           return [
-            `🟦 **Opzione ${index + 1}**`,
-            `${stars(score)}  _Match: ${score.toFixed(1)}/5_`,
-            bar(score),
+            `${flag}  OPZIONE ${index + 1}`,
             "",
-            `**${p.name}**`,
-            `📍 ${p.city}`,
-            `🕒 Semestre: ${weeks} settimane`,
+            `Match: ${stars(score)}  (${score.toFixed(1)}/5)`,
+            `${bar(score)}`,
             "",
-            `💵 **Totale stimato: €${Math.round(p.total)}**`,
-            `• Corso: €${Math.round(p.tuition)}`,
-            `• Alloggio: €${Math.round(p.housing)}`,
-            `• Fee e altre spese: €${Math.round(p.fees)}`,
+            `🏫  ${p.name}`,
+            `📍  ${p.city}`,
+            `🕒  Semestre: ${weeks} settimane`,
             "",
-            `🏷️ ${badges(p, score)}`,
+            `💵  Totale stimato: €${Math.round(p.total)}`,
+            `    • Corso: €${Math.round(p.tuition)}`,
+            `    • Alloggio: €${Math.round(p.housing)}`,
+            `    • Fee e altre spese: €${Math.round(p.fees)}`,
             "",
-            `📌 ${p.notes}`
+            `🔖  Tag: ${tags.join("  ")}`,
+            "",
+            `📌  ${p.notes}`,
+            "",
+            "────────────────────────────────────────"
           ].join("\n");
         });
 
         const reply =
-          `Ecco le **3 opzioni principali** che Edovia ha trovato per te in **${countryLabel}**:\n\n` +
-          lines.join("\n\n———————\n\n") +
+          `Ecco le **3 opzioni principali** che Edovia ha trovato per te in **${countryLabel}**.\n` +
+          `I costi sono stime per un semestre (24 settimane) corso + alloggio:\n\n` +
+          cards.join("\n\n") +
           "\n\n👉 Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, **CREA UN ACCOUNT**.";
 
         return res.json({
@@ -216,10 +225,10 @@ app.post("/chat", async (req, res) => {
           reply
         });
       }
-      // se non troviamo partner, si continua con la logica LLM sotto
+      // se non troviamo partner, si passa all'LLM normale
     }
 
-    // 2) Altrimenti usa l'LLM "generico"
+    // 2) Altrimenti: risposta generica via LLM
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
@@ -227,8 +236,8 @@ app.post("/chat", async (req, res) => {
           role: "system",
           content:
             "Sei Edovia AI, un comparatore di programmi di studio e formazione all'estero. " +
-            "Rispondi in modo breve, concreto, e guida l'utente a confrontare programmi, costi e requisiti. " +
-            "Quando possibile, invita l'utente a fare comparazioni tra programmi e Paesi diversi."
+            "Rispondi in modo breve, concreto e orientato alla scelta del programma. " +
+            "Quando ha senso, suggerisci di confrontare Paesi e tipologie diverse."
         },
         {
           role: "user",
@@ -238,7 +247,7 @@ app.post("/chat", async (req, res) => {
     });
 
     const reply =
-      completion.choices?.[0]?.message?.content ??
+      completion.choices?.[0]?.message?.content ||
       "C'è stato un problema, riprova tra poco.";
 
     res.json({
