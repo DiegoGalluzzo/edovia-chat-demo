@@ -1,0 +1,55 @@
+[
+  {
+    "id": "ca_ilac_toronto",
+    "name": "ILAC - Toronto",
+    "city": "Toronto",
+    "country": "canada",
+    "tuition_per_week": 410,
+    "housing_per_week": 430,
+    "fees": 225,
+    "min_weeks": 8,
+    "recommended_weeks_semester": 24,
+    "notes": "Scuola molto grande e internazionale, ottima per chi vuole fare un periodo lungo e valutare percorsi college in Canada.",
+    "url": "https://www.ilac.com"
+  },
+  {
+    "id": "ca_ilsc_vancouver",
+    "name": "ILSC - Vancouver",
+    "city": "Vancouver",
+    "country": "canada",
+    "tuition_per_week": 390,
+    "housing_per_week": 420,
+    "fees": 220,
+    "min_weeks": 8,
+    "recommended_weeks_semester": 24,
+    "notes": "Forte focus su programmi intensivi e pathways universitari. Città molto vivibile e green.",
+    "url": "https://www.ilsc.com"
+  },
+  {
+    "id": "ca_ec_toronto",
+    "name": "EC English - Toronto",
+    "city": "Toronto",
+    "country": "canada",
+    "tuition_per_week": 400,
+    "housing_per_week": 430,
+    "fees": 230,
+    "min_weeks": 8,
+    "recommended_weeks_semester": 24,
+    "notes": "Scuola moderna, classi relativamente piccole, buona per un mix lavoro/studio successivo.",
+    "url": "https://www.ecenglish.com"
+  },
+  {
+    "id": "ca_ilac_vancouver",
+    "name": "ILAC - Vancouver",
+    "city": "Vancouver",
+    "country": "canada",
+    "tuition_per_week": 400,
+    "housing_per_week": 420,
+    "fees": 225,
+    "min_weeks": 8,
+    "recommended_weeks_semester": 24,
+    "notes": "Molto popolare tra gli studenti europei, ideale per chi vuole un semestre in una città dinamica ma non caotica.",
+    "url": "https://www.ilac.com"
+  }
+]
+

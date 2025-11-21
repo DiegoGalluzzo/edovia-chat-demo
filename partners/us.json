@@ -1,0 +1,55 @@
+[
+  {
+    "id": "us_kaplan_nyc",
+    "name": "Kaplan International - New York",
+    "city": "New York",
+    "country": "usa",
+    "tuition_per_week": 545,
+    "housing_per_week": 450,
+    "fees": 250,
+    "min_weeks": 12,
+    "recommended_weeks_semester": 24,
+    "notes": "General English o Intensive English in campus centrale a Manhattan. Adatto a chi vuole un contesto molto internazionale.",
+    "url": "https://www.kaplaninternational.com"
+  },
+  {
+    "id": "us_kaplan_la",
+    "name": "Kaplan International - Los Angeles",
+    "city": "Los Angeles",
+    "country": "usa",
+    "tuition_per_week": 500,
+    "housing_per_week": 430,
+    "fees": 250,
+    "min_weeks": 12,
+    "recommended_weeks_semester": 24,
+    "notes": "Ottimo per chi vuole combinare studio + lifestyle in California. Molto richiesta la preparazione TOEFL/Academic English.",
+    "url": "https://www.kaplaninternational.com"
+  },
+  {
+    "id": "us_ec_sandiego",
+    "name": "EC English - San Diego",
+    "city": "San Diego",
+    "country": "usa",
+    "tuition_per_week": 480,
+    "housing_per_week": 420,
+    "fees": 230,
+    "min_weeks": 8,
+    "recommended_weeks_semester": 24,
+    "notes": "Scuola in zona centrale, vicina all’oceano. Ideale per chi cerca un ritmo più rilassato rispetto a NYC/LA.",
+    "url": "https://www.ecenglish.com"
+  },
+  {
+    "id": "us_els_boston",
+    "name": "ELS Language Centers - Boston",
+    "city": "Boston",
+    "country": "usa",
+    "tuition_per_week": 460,
+    "housing_per_week": 400,
+    "fees": 220,
+    "min_weeks": 8,
+    "recommended_weeks_semester": 24,
+    "notes": "Percorsi intensivi di inglese accademico in città universitaria, adatto per chi pensa a un successivo percorso college/università.",
+    "url": "https://www.els.edu"
+  }
+]
+
