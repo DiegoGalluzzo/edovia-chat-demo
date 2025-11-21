@@ -121,25 +121,94 @@ app.post("/chat", async (req, res) => {
       if (programs.length) {
         const countryLabel = countryCode === "us" ? "USA" : "Canada";
 
-        const lines = programs.slice(0, 3).map((p) => {
+        // calcola un punteggio di match budget-based
+        function matchScore(total, budget) {
+          const diff = total - budget;
+          if (diff <= 0) return 5.0;
+          const ratio = diff / budget;
+          if (ratio < 0.1) return 4.5;
+          if (ratio < 0.2) return 4.0;
+          if (ratio < 0.3) return 3.5;
+          if (ratio < 0.5) return 3.0;
+          return 2.5;
+        }
+
+        function stars(score) {
+          const full = Math.floor(score);
+          const empty = 5 - full;
+          return "⭐".repeat(full) + "☆".repeat(empty);
+        }
+
+        function bar(score) {
+          // score 0–5 -> 0–10 blocchi
+          const blocks = Math.round((score / 5) * 10);
+          const filled = "▰".repeat(blocks);
+          const empty = "▱".repeat(10 - blocks);
+          return filled + empty;
+        }
+
+        function badges(p, score) {
+          const result = [];
+
+          // badge budget
+          if (p.fitsBudget) {
+            result.push("💶 Budget ok");
+          } else {
+            result.push("💶 Sopra il budget");
+          }
+
+          // badge stile/contesto molto semplice
+          const cityLower = (p.city || "").toLowerCase();
+          if (cityLower.includes("boston") || cityLower.includes("new york")) {
+            result.push("🎓 Focus accademico");
+          }
+          if (cityLower.includes("los angeles") || cityLower.includes("san diego") || cityLower.includes("vancouver")) {
+            result.push("🌴 Lifestyle & outdoor");
+          }
+          if (cityLower.includes("toronto")) {
+            result.push("🏙️ Città grande");
+          }
+
+          // badge match
+          if (score >= 4.5) {
+            result.push("✅ Match molto alto");
+          } else if (score >= 4.0) {
+            result.push("✅ Buon match");
+          } else if (score >= 3.5) {
+            result.push("⚖️ Compromesso budget");
+          } else {
+            result.push("⚠️ Usa come riferimento");
+          }
+
+          return result.join(" · ");
+        }
+
+        const lines = programs.slice(0, 3).map((p, index) => {
+          const score = matchScore(p.total, budget);
+
           return [
-            `**${p.name} – ${p.city}**`,
-            `Totale stimato semestre (${weeks} settimane): ~€${Math.round(
-              p.total
-            )}`,
-            `• Corso: ~€${Math.round(p.tuition)}`,
-            `• Alloggio: ~€${Math.round(p.housing)}`,
-            `• Altre spese e fee: ~€${Math.round(p.fees)}`,
-            p.fitsBudget
-              ? "✅ Entro il tuo budget"
-              : "⚠️ Potrebbe superare il budget indicato",
-            `Nota: ${p.notes}`
+            `🟦 **Opzione ${index + 1}**`,
+            `${stars(score)}  _Match: ${score.toFixed(1)}/5_`,
+            bar(score),
+            "",
+            `**${p.name}**`,
+            `📍 ${p.city}`,
+            `🕒 Semestre: ${weeks} settimane`,
+            "",
+            `💵 **Totale stimato: €${Math.round(p.total)}**`,
+            `• Corso: €${Math.round(p.tuition)}`,
+            `• Alloggio: €${Math.round(p.housing)}`,
+            `• Fee e altre spese: €${Math.round(p.fees)}`,
+            "",
+            `🏷️ ${badges(p, score)}`,
+            "",
+            `📌 ${p.notes}`
           ].join("\n");
         });
 
         const reply =
-          `Ecco una comparazione sintetica di alcuni partner in **${countryLabel}** in base al tuo budget:\n\n` +
-          lines.join("\n\n---\n\n") +
+          `Ecco le **3 opzioni principali** che Edovia ha trovato per te in **${countryLabel}**:\n\n` +
+          lines.join("\n\n———————\n\n") +
           "\n\n👉 Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, **CREA UN ACCOUNT**.";
 
         return res.json({
@@ -150,7 +219,7 @@ app.post("/chat", async (req, res) => {
       // se non troviamo partner, si continua con la logica LLM sotto
     }
 
-    // 2) Altrimenti usa l'LLM "generico" come prima
+    // 2) Altrimenti usa l'LLM "generico"
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
