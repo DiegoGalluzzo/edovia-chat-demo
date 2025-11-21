@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const port = process.env.PORT || 3001;
 
-// OpenAI: chiave in OPENAI_API_KEY (Render env)
+// OpenAI: metti la chiave in OPENAI_API_KEY (env su Render)
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
@@ -19,7 +19,7 @@ const client = new OpenAI({
 app.use(cors());
 app.use(express.json());
 
-// Conteggio messaggi per sessione (demo)
+// Sessioni in memoria: { count, wizard: { budget, countryCode, weeks, goal } }
 const sessions = new Map();
 const MAX_MESSAGES_FREE = 20;
 
@@ -57,34 +57,64 @@ function comparePrograms({ countryCode, budget, weeks }) {
     .sort((a, b) => a.total - b.total);
 }
 
-// Estrae intento di comparazione: budget + paese
-function parseIntentForComparison(message) {
-  const lower = message.toLowerCase();
+/* ------------------- PARSING & HEURISTICHE ------------------- */
 
-  // budget tipo "8.000", "8000", "10'000"
-  const budgetMatch = lower.match(/(\d[\d\.'’]*\d|\d+)/);
-  const budget = budgetMatch
-    ? parseInt(budgetMatch[0].replace(/[^\d]/g, ""), 10)
-    : null;
+function parseBudget(text) {
+  const match = text.toLowerCase().match(/(\d[\d\.'’]*\d|\d+)/);
+  if (!match) return null;
+  const value = parseInt(match[0].replace(/[^\d]/g, ""), 10);
+  return isNaN(value) ? null : value;
+}
 
-  let countryCode = null;
+function parseCountryCode(text) {
+  const lower = text.toLowerCase();
   if (
     lower.includes("usa") ||
     lower.includes("stati uniti") ||
-    lower.includes("stato unito")
+    lower.includes("stato unito") ||
+    lower.includes("america")
   ) {
-    countryCode = "us";
-  } else if (lower.includes("canada") || lower.includes("canadà")) {
-    countryCode = "canada";
+    return "us";
+  }
+  if (lower.includes("canada") || lower.includes("canadà")) {
+    return "canada";
+  }
+  return null;
+}
+
+function parseWeeks(text) {
+  const lower = text.toLowerCase();
+
+  if (lower.includes("estate")) return 12;
+  if (lower.includes("semestre")) return 24;
+  if (lower.includes("anno")) return 48;
+
+  const match = lower.match(/(\d+)\s*(settimane|sett\.?|mesi|mese)/);
+  if (match) {
+    const num = parseInt(match[1], 10);
+    if (match[2].startsWith("mes")) {
+      // mesi -> 4 settimane circa
+      return num * 4;
+    }
+    return num;
   }
 
-  const weeks = 24; // per ora: semestre = 24 settimane
+  return null;
+}
 
-  if (!budget || !countryCode) {
-    return null;
-  }
-
-  return { budget, countryCode, weeks };
+function isProgramIntent(text) {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("usa") ||
+    lower.includes("canada") ||
+    lower.includes("programma") ||
+    lower.includes("all'estero") ||
+    lower.includes("estero") ||
+    lower.includes("semestre") ||
+    lower.includes("anno") ||
+    lower.includes("estate") ||
+    parseBudget(text) !== null
+  );
 }
 
 /* ------------------------- ROUTE CHAT ------------------------- */
@@ -99,161 +129,239 @@ app.post("/chat", async (req, res) => {
         .json({ error: "sessionId e message sono obbligatori" });
     }
 
-    // Limite messaggi free per sessione
-    const current = sessions.get(sessionId) || 0;
-    if (current >= MAX_MESSAGES_FREE) {
+    // recupera / crea sessione
+    let session = sessions.get(sessionId);
+    if (!session) {
+      session = { count: 0, wizard: {} };
+      sessions.set(sessionId, session);
+    }
+
+    // limite messaggi free
+    if (session.count >= MAX_MESSAGES_FREE) {
       return res.json({
         type: "limit_reached",
         reply:
           "Hai usato tutte le domande gratuite per esplorare i programmi. " +
-          "Per salvare questa comparazione e continuare senza limiti, CREA UN ACCOUNT Edovia.",
-        ctaUrl: "" // per ora nessun link
+          "Per salvare questa comparazione e continuare senza limiti, [[CREA_UN_ACCOUNT]].",
+        ctaUrl: ""
       });
     }
-    sessions.set(sessionId, current + 1);
+    session.count += 1;
 
-    // 1) Se messaggio contiene budget + paese, usa comparatore
-    const comparisonIntent = parseIntentForComparison(message);
-    if (comparisonIntent) {
-      const { budget, countryCode, weeks } = comparisonIntent;
-      const programs = comparePrograms({ countryCode, budget, weeks });
+    const text = String(message || "").trim();
+    const wizard = session.wizard || (session.wizard = {});
 
-      if (programs.length) {
-        const countryLabel = countryCode === "us" ? "USA" : "Canada";
-        const flag = countryCode === "us" ? "🇺🇸" : "🇨🇦";
+    // popola automaticamente eventuali parametri dal messaggio corrente
+    const detectedBudget = parseBudget(text);
+    if (detectedBudget && !wizard.budget) wizard.budget = detectedBudget;
 
-        // Punteggio di match basato sul budget
-        function matchScore(total, budget) {
-          const diff = total - budget;
-          if (diff <= 0) return 5.0;
-          const ratio = diff / budget;
-          if (ratio < 0.1) return 4.5;
-          if (ratio < 0.2) return 4.0;
-          if (ratio < 0.3) return 3.5;
-          if (ratio < 0.5) return 3.0;
-          return 2.5;
-        }
-
-        function stars(score) {
-          const full = Math.floor(score);
-          const empty = 5 - full;
-          return "★".repeat(full) + "☆".repeat(empty);
-        }
-
-        function bar(score) {
-          // score 0–5 -> 0–10 blocchi
-          const blocks = Math.round((score / 5) * 10);
-          const filled = "▰".repeat(blocks);
-          const empty = "▱".repeat(10 - blocks);
-          return filled + empty;
-        }
-
-        function badgeArray(p, score) {
-          const result = [];
-
-          // budget
-          if (p.fitsBudget) {
-            result.push("[Budget ok]");
-          } else {
-            result.push("[Sopra budget]");
-          }
-
-          const cityLower = (p.city || "").toLowerCase();
-          if (cityLower.includes("boston") || cityLower.includes("new york")) {
-            result.push("[Focus accademico]");
-          }
-          if (
-            cityLower.includes("los angeles") ||
-            cityLower.includes("san diego") ||
-            cityLower.includes("vancouver")
-          ) {
-            result.push("[Lifestyle & outdoor]");
-          }
-          if (cityLower.includes("toronto")) {
-            result.push("[Grande città]");
-          }
-
-          // match
-          if (score >= 4.5) {
-            result.push("[Match molto alto]");
-          } else if (score >= 4.0) {
-            result.push("[Buon match]");
-          } else if (score >= 3.5) {
-            result.push("[Compromesso budget]");
-          } else {
-            result.push("[Usa come riferimento]");
-          }
-
-          return result;
-        }
-
-        const cards = programs.slice(0, 3).map((p, index) => {
-          const score = matchScore(p.total, budget);
-          const tags = badgeArray(p, score);
-
-          return [
-            `${flag}  OPZIONE ${index + 1}`,
-            "",
-            `Match: ${stars(score)}  (${score.toFixed(1)}/5)`,
-            `${bar(score)}`,
-            "",
-            `🏫  ${p.name}`,
-            `📍  ${p.city}`,
-            `🕒  Semestre: ${weeks} settimane`,
-            "",
-            `💵  Totale stimato: €${Math.round(p.total)}`,
-            `    • Corso: €${Math.round(p.tuition)}`,
-            `    • Alloggio: €${Math.round(p.housing)}`,
-            `    • Fee e altre spese: €${Math.round(p.fees)}`,
-            "",
-            `🔖  Tag: ${tags.join("  ")}`,
-            "",
-            `📌  ${p.notes}`,
-            "",
-            "────────────────────────────────────────"
-          ].join("\n");
-        });
-
-        const reply =
-          `Ecco le **3 opzioni principali** che Edovia ha trovato per te in **${countryLabel}**.\n` +
-          `I costi sono stime per un semestre (24 settimane) corso + alloggio:\n\n` +
-          cards.join("\n\n") +
-          "\n\n👉 Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, **CREA UN ACCOUNT**.";
-
-        return res.json({
-          type: "ok",
-          reply
-        });
-      }
-      // se non troviamo partner, si passa all'LLM normale
+    const detectedCountry = parseCountryCode(text);
+    if (detectedCountry && !wizard.countryCode) {
+      wizard.countryCode = detectedCountry;
     }
 
-    // 2) Altrimenti: risposta generica via LLM
-    const completion = await client.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            "Sei Edovia AI, un comparatore di programmi di studio e formazione all'estero. " +
-            "Rispondi in modo breve, concreto e orientato alla scelta del programma. " +
-            "Quando ha senso, suggerisci di confrontare Paesi e tipologie diverse."
-        },
-        {
-          role: "user",
-          content: message
+    const detectedWeeks = parseWeeks(text);
+    if (detectedWeeks && !wizard.weeks) wizard.weeks = detectedWeeks;
+
+    const wizardActive =
+      wizard.budget || wizard.countryCode || wizard.weeks || wizard.goal;
+
+    // se non stiamo ancora parlando di programmi e non c'è wizard attivo -> LLM generico
+    if (!wizardActive && !isProgramIntent(text)) {
+      const completion = await client.chat.completions.create({
+        model: "gpt-4.1-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Sei Edovia AI, un assistente che spiega come funziona un comparatore di programmi di studio all'estero. " +
+              "Rispondi in modo chiaro e sintetico. Quando l'utente parla di budget, Paesi o programmi, guida verso la comparazione."
+          },
+          { role: "user", content: text }
+        ]
+      });
+
+      const reply =
+        completion.choices?.[0]?.message?.content ||
+        "C'è stato un problema, riprova tra poco.";
+
+      return res.json({ type: "ok", reply });
+    }
+
+    /* --------- WIZARD GUIDATO: budget -> paese -> durata -> obiettivo --------- */
+
+    if (!wizard.budget) {
+      const reply =
+        "Perfetto, ti aiuto a confrontare i programmi all’estero.\n\n" +
+        "Per farlo mi servono 4 informazioni:\n" +
+        "1. Il **budget totale** (corso + alloggio)\n" +
+        "2. Il **Paese** che preferisci\n" +
+        "3. La **durata** (es. estate, semestre, anno)\n" +
+        "4. Il tuo **obiettivo** (cosa vuoi ottenere dal viaggio)\n\n" +
+        "Partiamo dal budget: **quanto puoi spendere in totale?** 💶\n" +
+        "_Esempio: 8.000€, 10.000 euro, 12k..._";
+      return res.json({ type: "ok", reply });
+    }
+
+    if (!wizard.countryCode) {
+      const reply =
+        `Ok, budget indicativo: **circa €${wizard.budget}**.\n\n` +
+        "Ora scegli la destinazione principale che vuoi confrontare:\n\n" +
+        "• 🇺🇸 **USA** (città come Boston, New York, Los Angeles, San Diego)\n" +
+        "• 🇨🇦 **Canada** (Toronto, Vancouver, ecc.)\n\n" +
+        "Scrivi ad esempio: _USA_ oppure _Canada_.";
+      return res.json({ type: "ok", reply });
+    }
+
+    if (!wizard.weeks) {
+      const reply =
+        "Perfetto. Che **durata** hai in mente? ⏱️\n\n" +
+        "Puoi rispondere in settimane oppure scegliere una di queste opzioni:\n" +
+        "• _Estate_: 8–12 settimane\n" +
+        "• _Semestre_: 24 settimane\n" +
+        "• _Anno_: 48 settimane\n\n" +
+        "Ad esempio: _24 settimane_, _semestre_, _3 mesi_, _anno intero_.";
+      return res.json({ type: "ok", reply });
+    }
+
+    if (!wizard.goal) {
+      const reply =
+        "Ultimo passo: qual è il tuo **obiettivo principale** per questo periodo all’estero? 🎯\n\n" +
+        "Puoi scrivere in modo libero, oppure ispirarti a questi esempi:\n" +
+        "• Migliorare l’inglese per **università** o **lavoro**\n" +
+        "• Fare un’esperienza **culturale** e di crescita personale\n" +
+        "• Preparare esami come **IELTS** o **TOEFL**\n" +
+        "• Capire se in futuro potrei **trasferirmi** in quel Paese\n\n" +
+        "Scrivi in una frase cosa ti aspetti dal viaggio.";
+      return res.json({ type: "ok", reply });
+    }
+
+    // a questo punto abbiamo tutto: budget + countryCode + weeks + goal
+    const countryCode = wizard.countryCode;
+    const countryLabel = countryCode === "us" ? "USA" : "Canada";
+    const flag = countryCode === "us" ? "🇺🇸" : "🇨🇦";
+
+    const programs = comparePrograms({
+      countryCode,
+      budget: wizard.budget,
+      weeks: wizard.weeks
+    });
+
+    if (programs.length) {
+      function matchScore(total, budget) {
+        const diff = total - budget;
+        if (diff <= 0) return 5.0;
+        const ratio = diff / budget;
+        if (ratio < 0.1) return 4.5;
+        if (ratio < 0.2) return 4.0;
+        if (ratio < 0.3) return 3.5;
+        if (ratio < 0.5) return 3.0;
+        return 2.5;
+      }
+
+      function stars(score) {
+        const full = Math.floor(score);
+        const empty = 5 - full;
+        return "★".repeat(full) + "☆".repeat(empty);
+      }
+
+      function bar(score) {
+        const blocks = Math.round((score / 5) * 10);
+        const filled = "▰".repeat(blocks);
+        const empty = "▱".repeat(10 - blocks);
+        return filled + empty;
+      }
+
+      function badgeArray(p, score) {
+        const result = [];
+
+        if (p.fitsBudget) {
+          result.push("[Budget ok]");
+        } else {
+          result.push("[Sopra budget]");
         }
-      ]
-    });
 
-    const reply =
-      completion.choices?.[0]?.message?.content ||
-      "C'è stato un problema, riprova tra poco.";
+        const cityLower = (p.city || "").toLowerCase();
+        if (cityLower.includes("boston") || cityLower.includes("new york")) {
+          result.push("[Focus accademico]");
+        }
+        if (
+          cityLower.includes("los angeles") ||
+          cityLower.includes("san diego") ||
+          cityLower.includes("vancouver")
+        ) {
+          result.push("[Lifestyle & outdoor]");
+        }
+        if (cityLower.includes("toronto")) {
+          result.push("[Grande città]");
+        }
 
-    res.json({
-      type: "ok",
-      reply
-    });
+        if (score >= 4.5) {
+          result.push("[Match molto alto]");
+        } else if (score >= 4.0) {
+          result.push("[Buon match]");
+        } else if (score >= 3.5) {
+          result.push("[Compromesso budget]");
+        } else {
+          result.push("[Usa come riferimento]");
+        }
+
+        return result;
+      }
+
+      const cards = programs.slice(0, 3).map((p, index) => {
+        const score = matchScore(p.total, wizard.budget);
+        const tags = badgeArray(p, score);
+
+        return [
+          `${flag}  OPZIONE ${index + 1}`,
+          "",
+          `Match: ${stars(score)}  (${score.toFixed(1)}/5)`,
+          `${bar(score)}`,
+          "",
+          `🏫  ${p.name}`,
+          `📍  ${p.city}`,
+          `🕒  Durata stimata: ${wizard.weeks} settimane`,
+          "",
+          `💵  Totale stimato: €${Math.round(p.total)}`,
+          `    • Corso: €${Math.round(p.tuition)}`,
+          `    • Alloggio: €${Math.round(p.housing)}`,
+          `    • Fee e altre spese: €${Math.round(p.fees)}`,
+          "",
+          `🔖  Tag: ${tags.join("  ")}`,
+          "",
+          `📌  ${p.notes}`,
+          "",
+          "────────────────────────────────────────"
+        ].join("\n");
+      });
+
+      const reply =
+        `In base al tuo obiettivo **“${wizard.goal.trim()}”**, al budget di circa **€${wizard.budget}** ` +
+        `e alla durata di **${wizard.weeks} settimane** in **${countryLabel}**, ` +
+        `ecco le opzioni che Edovia ha trovato per te:\n\n` +
+        "────────────────────────────────────────\n\n" +
+        cards.join("\n\n") +
+        "\n\n👉 Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, [[CREA_UN_ACCOUNT]].";
+
+      // resettiamo il wizard per una nuova ricerca
+      session.wizard = {};
+
+      return res.json({
+        type: "ok",
+        reply
+      });
+    }
+
+    // Nessun partner trovato -> messaggio di fallback
+    const fallbackReply =
+      "Per i parametri che hai inserito non trovo partner compatibili nei Paesi selezionati. " +
+      "Possiamo provare a:\n" +
+      "• Aumentare un po’ il budget\n" +
+      "• Ridurre la durata\n" +
+      "• Valutare un altro Paese (es. Canada invece di USA)\n\n" +
+      "Dimmi cosa preferisci modificare e rifacciamo il confronto.";
+    return res.json({ type: "ok", reply: fallbackReply });
   } catch (err) {
     console.error("Errore /chat:", err);
     res.status(500).json({ error: "Errore server" });
