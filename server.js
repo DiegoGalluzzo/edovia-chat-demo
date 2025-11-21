@@ -58,15 +58,44 @@ function comparePrograms({ countryCode, budget, weeks }) {
 
 /* ------------------- PARSING ------------------- */
 
+/**
+ * Interpreta un budget dal testo.
+ * - accetta numeri con contesto monetario (€, euro, eur, k, mila)
+ * - oppure numeri "grandi" (>= 100) anche senza simboli
+ * - ignora numeri piccoli in contesti non monetari (es. "1 anno", "3 mesi")
+ */
 function parseBudget(text) {
-  const match = text.toLowerCase().match(/(\d[\d\.'’]*\d|\d+)/);
+  const lower = text.toLowerCase();
+
+  const hasCurrency =
+    lower.includes("€") ||
+    lower.includes("euro") ||
+    lower.includes(" eur") ||
+    lower.includes(" eur ") ||
+    lower.includes(" k") || // es. "10k"
+    lower.includes(" mila"); // es. "10 mila"
+
+  const match = lower.match(/(\d[\d\.'’]*\d|\d+)/);
   if (!match) return null;
+
   const value = parseInt(match[0].replace(/[^\d]/g, ""), 10);
-  return isNaN(value) ? null : value;
+  if (isNaN(value)) return null;
+
+  // Se non c'è contesto monetario, escludo numeri piccoli (tipicamente durate: 1, 3, 6, 12...)
+  if (!hasCurrency && value < 100) {
+    return null;
+  }
+
+  return value;
 }
 
+/**
+ * Riconosce il Paese sia da parole chiave che da città tipiche.
+ */
 function parseCountryCode(text) {
   const lower = text.toLowerCase();
+
+  // parole generiche
   if (
     lower.includes("usa") ||
     lower.includes("stati uniti") ||
@@ -77,9 +106,34 @@ function parseCountryCode(text) {
   if (lower.includes("canada") || lower.includes("canadà")) {
     return "canada";
   }
+
+  // città tipiche USA
+  if (
+    lower.includes("boston") ||
+    lower.includes("new york") ||
+    lower.includes("los angeles") ||
+    lower.includes("san diego")
+  ) {
+    return "us";
+  }
+
+  // città tipiche Canada
+  if (
+    lower.includes("toronto") ||
+    lower.includes("vancouver") ||
+    lower.includes("montreal") ||
+    lower.includes("calgary")
+  ) {
+    return "canada";
+  }
+
   return null;
 }
 
+/**
+ * Interpreta la durata in settimane, partendo da parole chiave
+ * (estate/semestre/anno) o espressioni tipo "3 mesi", "24 settimane".
+ */
 function parseWeeks(text) {
   const lower = text.toLowerCase();
 
@@ -100,6 +154,10 @@ function parseWeeks(text) {
   return null;
 }
 
+/**
+ * Riconosce se il messaggio dell'utente parla di programmi/viaggi
+ * (serve per decidere se usare il wizard o l'LLM generico).
+ */
 function isProgramIntent(text) {
   const lower = text.toLowerCase();
   return (
@@ -159,7 +217,8 @@ app.post("/chat", async (req, res) => {
     const detectedWeeks = parseWeeks(text);
     if (detectedWeeks && !wizard.weeks) wizard.weeks = detectedWeeks;
 
-    // se abbiamo già tutto tranne goal, e questo messaggio non è stato interpretato come budget/paese/durata -> trattalo come goal
+    // se abbiamo già tutto tranne goal, e questo messaggio non è stato interpretato
+    // come budget/paese/durata -> trattalo come goal
     if (
       wizard.budget &&
       wizard.countryCode &&
@@ -210,8 +269,7 @@ app.post("/chat", async (req, res) => {
     }
 
     if (!wizard.countryCode) {
-      const reply =
-        `Ok, budget indicativo: circa €${wizard.budget}.\n\nOra scegli la destinazione principale che vuoi confrontare:\n\n• USA (città come Boston, New York, Los Angeles, San Diego)\n• Canada (Toronto, Vancouver, ecc.)\n\nScrivi ad esempio: USA oppure Canada.`;
+      const reply = `Ok, budget indicativo: circa €${wizard.budget}.\n\nOra scegli la destinazione principale che vuoi confrontare:\n\n• USA (città come Boston, New York, Los Angeles, San Diego)\n• Canada (Toronto, Vancouver, ecc.)\n\nScrivi ad esempio: USA oppure Canada.`;
       return res.json({ type: "ok", reply });
     }
 
@@ -329,8 +387,7 @@ app.post("/chat", async (req, res) => {
         return lines.join("\n");
       });
 
-      const header =
-        `In base al tuo obiettivo "${wizard.goal.trim()}", al budget di circa €${wizard.budget} e alla durata di ${wizard.weeks} settimane in ${countryLabel}, ecco le principali opzioni che Edovia ha trovato per te:\n\n`;
+      const header = `In base al tuo obiettivo "${wizard.goal.trim()}", al budget di circa €${wizard.budget} e alla durata di ${wizard.weeks} settimane in ${countryLabel}, ecco le principali opzioni che Edovia ha trovato per te:\n\n`;
 
       const cta =
         "Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, [[CREA_UN_ACCOUNT]].";
