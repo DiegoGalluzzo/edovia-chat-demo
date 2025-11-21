@@ -93,7 +93,7 @@ function parseWeeks(text) {
   if (match) {
     const num = parseInt(match[1], 10);
     if (match[2].startsWith("mes")) {
-      // mesi -> 4 settimane circa
+      // mesi -> ~4 settimane
       return num * 4;
     }
     return num;
@@ -112,7 +112,8 @@ function isProgramIntent(text) {
     lower.includes("estero") ||
     lower.includes("semestre") ||
     lower.includes("anno") ||
-    lower.includes("estate") ||
+    lower.includes("summer") ||
+    lower.includes("exchange") ||
     parseBudget(text) !== null
   );
 }
@@ -151,7 +152,7 @@ app.post("/chat", async (req, res) => {
     const text = String(message || "").trim();
     const wizard = session.wizard || (session.wizard = {});
 
-    // popola automaticamente eventuali parametri dal messaggio corrente
+    // 1) Popola automaticamente eventuali parametri dal messaggio corrente
     const detectedBudget = parseBudget(text);
     if (detectedBudget && !wizard.budget) wizard.budget = detectedBudget;
 
@@ -163,10 +164,25 @@ app.post("/chat", async (req, res) => {
     const detectedWeeks = parseWeeks(text);
     if (detectedWeeks && !wizard.weeks) wizard.weeks = detectedWeeks;
 
+    // 2) Se abbiamo già budget+paese+durata ma NON abbiamo ancora goal,
+    //    e questo messaggio NON ha appena impostato budget/paese/durata,
+    //    allora trattiamo il testo come risposta all'obiettivo.
+    if (
+      wizard.budget &&
+      wizard.countryCode &&
+      wizard.weeks &&
+      !wizard.goal &&
+      !detectedBudget &&
+      !detectedCountry &&
+      !detectedWeeks
+    ) {
+      wizard.goal = text;
+    }
+
     const wizardActive =
       wizard.budget || wizard.countryCode || wizard.weeks || wizard.goal;
 
-    // se non stiamo ancora parlando di programmi e non c'è wizard attivo -> LLM generico
+    // 3) Se non stiamo ancora parlando di programmi e non c'è wizard attivo -> LLM generico
     if (!wizardActive && !isProgramIntent(text)) {
       const completion = await client.chat.completions.create({
         model: "gpt-4.1-mini",
