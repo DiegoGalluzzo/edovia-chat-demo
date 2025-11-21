@@ -154,23 +154,48 @@ function parseWeeks(text) {
 }
 
 /**
- * Riconosce un "goal" di massima dal testo:
- * esperienza culturale, crescita personale, lavoro, università, esami, ecc.
+ * Riconosce un "goal" dal testo.
+ * - usa keyword morbide (cultura, svago, networking, lavoro, ecc.)
+ * - scarta frasi che in realtà sono budget/durata/paese
+ * - se non contiene numeri ed è testo "libero", lo considera goal
  */
 function parseGoal(text) {
-  const lower = text.toLowerCase();
+  const lower = text.toLowerCase().trim();
 
-  if (
-    lower.includes("cultur") ||
-    lower.includes("cresc") ||
-    lower.includes("personal") ||
-    lower.includes("univers") ||
-    lower.includes("lavor") ||
-    lower.includes("inglese") ||
-    lower.includes("toefl") ||
-    lower.includes("ielts") ||
-    lower.includes("accadem")
-  ) {
+  const goalKeywords = [
+    "cultur",
+    "cresc",
+    "persona",
+    "viagg",
+    "esperien",
+    "divert",
+    "svago",
+    "network",
+    "conoscer",
+    "amic",
+    "stud",
+    "lavor",
+    "inglese",
+    "univers",
+    "toefl",
+    "ielts",
+    "accadem",
+    "trasfer",
+    "business",
+    "carriera"
+  ];
+
+  if (goalKeywords.some((k) => lower.includes(k))) {
+    return text.trim();
+  }
+
+  // se sembra un budget/durata/paese, non è un goal
+  if (parseBudget(text)) return null;
+  if (parseWeeks(text)) return null;
+  if (parseCountryCode(text)) return null;
+
+  // testo senza numeri → quasi certamente un'intenzione/goal
+  if (!/\d/.test(lower)) {
     return text.trim();
   }
 
@@ -253,7 +278,7 @@ app.post("/chat", async (req, res) => {
     // se non stiamo facendo il wizard e il messaggio non parla di programmi -> LLM generico
     if (!wizardActive && !isProgramIntent(text)) {
       const systemPrompt =
-        "Sei Edovia AI, un assistente che spiega come funziona un comparatore AI di programmi di studio all'estero. Rispondi in modo chiaro e sintetico, sempre in italiano. Quando l'utente parla di budget, Paesi o programmi, guidalo verso la comparazione. Non usare markdown o asterischi, solo testo semplice con a capo.";
+        "Sei Edovia AI, un assistente che spiega come funziona un comparatore AI di programmi di studio all'estero. Rispondi in modo chiaro, breve e concreto, sempre in italiano. Quando l'utente parla di budget, Paesi o programmi, guidalo verso la comparazione con tono amichevole. Non usare markdown o asterischi, solo testo semplice con a capo.";
 
       const completion = await client.chat.completions.create({
         model: "gpt-4.1-mini",
@@ -305,26 +330,26 @@ app.post("/chat", async (req, res) => {
 
       let intro = "";
       if (knownParts.length) {
-        intro = "Ok, finora ho capito " + naturalJoin(knownParts) + ".\n\n";
+        intro = "Perfetto, ho già queste info: " + naturalJoin(knownParts) + ".\n\n";
       } else {
         intro =
-          "Perfetto, ti aiuto a confrontare i programmi all’estero.\nPuoi rispondere anche in modo libero, ad esempio: \"Ho 9000 euro per un anno negli USA per fare un’esperienza culturale\".\n\n";
+          "Ok, ti aiuto a capire quali programmi sono davvero alla tua portata.\nTi faccio solo qualche domanda veloce.\n\n";
       }
 
       let question = "";
 
       if (missingBudget) {
         question =
-          "Partiamo dal budget totale che hai a disposizione per corso + alloggio. Quanto puoi spendere in totale? Puoi scrivere, ad esempio: 8000 euro, 10000, 12000...";
+          "Partiamo dal budget totale per corso + alloggio. Quanto pensavi di spendere in tutto? Puoi scrivere ad esempio: 8000 euro, 10000, 12000.";
       } else if (missingCountry) {
         question =
-          "Ora scegli il Paese di destinazione che vuoi confrontare: ad esempio USA oppure Canada. Se hai già in mente una città (es. Boston, San Diego, Toronto), puoi scriverla.";
+          "Ora la destinazione: dove ti piacerebbe andare? Puoi scrivere il Paese (USA, Canada) o anche una città come San Diego o Toronto.";
       } else if (missingWeeks) {
         question =
-          "Che durata hai in mente? Puoi rispondere in settimane oppure scrivere: estate, semestre, anno. Ad esempio: 24 settimane, 3 mesi, un anno intero.";
+          "Per quanto tempo vorresti restare? Puoi scrivere 'estate', 'un semestre', 'un anno' oppure indicare settimane o mesi (es. 24 settimane, 6 mesi).";
       } else if (missingGoal) {
         question =
-          "Ultimo passo: qual è il tuo obiettivo principale per questo periodo all’estero? Puoi scrivere in modo libero, ad esempio: esperienza culturale e di crescita personale, migliorare l’inglese per l’università, preparare esami come IELTS o TOEFL, capire se potrei trasferirmi in quel Paese.";
+          "Ultima cosa: qual è il motivo principale per cui vuoi partire? Ad esempio: esperienza culturale, migliorare l’inglese, fare networking, preparare esami o altro.";
       }
 
       const reply = intro + question;
@@ -434,15 +459,15 @@ app.post("/chat", async (req, res) => {
         return lines.join("\n");
       });
 
-      const header = `In base al tuo obiettivo "${wizard.goal.trim()}", al budget di circa €${wizard.budget} e alla durata di ${wizard.weeks} settimane in ${countryLabel}, ecco le principali opzioni che Edovia ha trovato per te:\n\n`;
+      const header =
+        `Ho elaborato il tuo profilo (budget circa €${wizard.budget}, durata ${wizard.weeks} settimane in ${countryLabel}, obiettivo: "${wizard.goal.trim()}").\n` +
+        "Ecco alcune opzioni da cui partire:\n\n" +
+        "────────────────────────────────────────\n\n";
 
       const cta =
         "Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, [[CREA_UN_ACCOUNT]]";
 
-      const reply =
-        header +
-        "────────────────────────────────────────\n\n" +
-        cards.join("\n\n");
+      const reply = header + cards.join("\n\n") + "\n\n" + cta;
 
       // reset wizard per eventuale nuova ricerca
       session.wizard = { started: false };
@@ -454,7 +479,11 @@ app.post("/chat", async (req, res) => {
     }
 
     const fallbackReply =
-      "Per i parametri che hai inserito non trovo partner compatibili nei Paesi selezionati. Possiamo provare a:\n• Aumentare un po’ il budget\n• Ridurre la durata\n• Valutare un altro Paese (ad esempio Canada invece di USA)\n\nDimmi cosa preferisci modificare e rifacciamo il confronto.";
+      "Per i parametri che hai inserito non trovo partner compatibili nei Paesi selezionati. Possiamo provare a:\n" +
+      "• Aumentare un po’ il budget\n" +
+      "• Ridurre la durata\n" +
+      "• Valutare un altro Paese (ad esempio Canada invece di USA)\n\n" +
+      "Dimmi cosa preferisci modificare e rifacciamo il confronto.";
     return res.json({ type: "ok", reply: fallbackReply });
   } catch (err) {
     console.error("Errore /chat:", err);
