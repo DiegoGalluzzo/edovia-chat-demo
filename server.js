@@ -442,9 +442,7 @@ app.post("/chat", async (req, res) => {
       const reply =
         header +
         "────────────────────────────────────────\n\n" +
-        cards.join("\n\n") +
-        "\n\n👉 " +
-        cta;
+        cards.join("\n\n");
 
       // reset wizard per eventuale nuova ricerca
       session.wizard = { started: false };
