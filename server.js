@@ -18,9 +18,21 @@ const client = new OpenAI({
 app.use(cors());
 app.use(express.json());
 
-// sessione: { count, wizard: { started, budget, countryCode, weeks, goal } }
+// sessione: { count, wizard: { budget, countryCode, weeks, goal, city } }
 const sessions = new Map();
 const MAX_MESSAGES_FREE = 20;
+
+// lista dei Paesi disponibili in base ai file partners/*.json
+const partnersDir = path.join(__dirname, "partners");
+let availableCountries = [];
+try {
+  availableCountries = fs
+    .readdirSync(partnersDir)
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => path.basename(f, ".json"));
+} catch (err) {
+  console.error("Errore leggendo la cartella partners:", err.message);
+}
 
 /* ------------------- PARTNER & COMPARATORE ------------------- */
 
@@ -56,170 +68,6 @@ function comparePrograms({ countryCode, budget, weeks }) {
     .sort((a, b) => a.total - b.total);
 }
 
-/* ------------------- PARSING ------------------- */
-
-/**
- * Interpreta un budget dal testo.
- * - accetta numeri con contesto monetario (€, euro, eur, k, mila)
- * - oppure numeri "grandi" (>= 100) anche senza simboli
- * - ignora numeri piccoli in contesti non monetari (es. "1 anno", "3 mesi")
- */
-function parseBudget(text) {
-  const lower = text.toLowerCase();
-
-  const hasCurrency =
-    lower.includes("€") ||
-    lower.includes("euro") ||
-    lower.includes(" eur") ||
-    lower.includes(" k") || // es. "10k"
-    lower.includes(" mila"); // es. "10 mila"
-
-  const match = lower.match(/(\d[\d\.'’]*\d|\d+)/);
-  if (!match) return null;
-
-  const value = parseInt(match[0].replace(/[^\d]/g, ""), 10);
-  if (isNaN(value)) return null;
-
-  // Se non c'è contesto monetario, escludo numeri piccoli (tipicamente durate)
-  if (!hasCurrency && value < 100) {
-    return null;
-  }
-
-  return value;
-}
-
-/**
- * Riconosce il Paese sia da parole chiave che da città tipiche.
- */
-function parseCountryCode(text) {
-  const lower = text.toLowerCase();
-
-  // parole generiche
-  if (
-    lower.includes("usa") ||
-    lower.includes("stati uniti") ||
-    lower.includes("america")
-  ) {
-    return "us";
-  }
-  if (lower.includes("canada") || lower.includes("canadà")) {
-    return "canada";
-  }
-
-  // città tipiche USA
-  if (
-    lower.includes("boston") ||
-    lower.includes("new york") ||
-    lower.includes("los angeles") ||
-    lower.includes("san diego")
-  ) {
-    return "us";
-  }
-
-  // città tipiche Canada
-  if (
-    lower.includes("toronto") ||
-    lower.includes("vancouver") ||
-    lower.includes("montreal") ||
-    lower.includes("calgary")
-  ) {
-    return "canada";
-  }
-
-  return null;
-}
-
-/**
- * Interpreta la durata in settimane, partendo da parole chiave
- * (estate/semestre/anno) o espressioni tipo "3 mesi", "24 settimane".
- */
-function parseWeeks(text) {
-  const lower = text.toLowerCase();
-
-  if (lower.includes("estate") || lower.includes("summer")) return 12;
-  if (lower.includes("semestre") || lower.includes("semester")) return 24;
-  if (lower.includes("anno") || lower.includes("year")) return 48;
-
-  const match = lower.match(/(\d+)\s*(settimane|sett\.?|weeks?|mesi|mese|months?)/);
-  if (match) {
-    const num = parseInt(match[1], 10);
-    const unit = match[2];
-    if (unit.startsWith("mes") || unit.startsWith("month")) {
-      return num * 4;
-    }
-    return num;
-  }
-
-  return null;
-}
-
-/**
- * Riconosce un "goal" dal testo.
- * - usa keyword morbide (cultura, svago, networking, lavoro, ecc.)
- * - scarta frasi che in realtà sono budget/durata/paese
- * - se non contiene numeri ed è testo "libero", lo considera goal
- */
-function parseGoal(text) {
-  const lower = text.toLowerCase().trim();
-
-  const goalKeywords = [
-    "cultur",
-    "cresc",
-    "persona",
-    "viagg",
-    "esperien",
-    "divert",
-    "svago",
-    "network",
-    "conoscer",
-    "amic",
-    "stud",
-    "lavor",
-    "inglese",
-    "univers",
-    "toefl",
-    "ielts",
-    "accadem",
-    "trasfer",
-    "business",
-    "carriera"
-  ];
-
-  if (goalKeywords.some((k) => lower.includes(k))) {
-    return text.trim();
-  }
-
-  // se sembra un budget/durata/paese, non è un goal
-  if (parseBudget(text)) return null;
-  if (parseWeeks(text)) return null;
-  if (parseCountryCode(text)) return null;
-
-  // testo senza numeri → quasi certamente un'intenzione/goal
-  if (!/\d/.test(lower)) {
-    return text.trim();
-  }
-
-  return null;
-}
-
-/**
- * Riconosce se il messaggio dell'utente parla di programmi/viaggi.
- */
-function isProgramIntent(text) {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes("usa") ||
-    lower.includes("canada") ||
-    lower.includes("all'estero") ||
-    lower.includes("anno") ||
-    lower.includes("semestre") ||
-    lower.includes("exchange") ||
-    lower.includes("programma") ||
-    lower.includes("programmi") ||
-    parseBudget(text) !== null
-  );
-}
-
 /* ------------------- UTIL ------------------- */
 
 function naturalJoin(list) {
@@ -227,6 +75,141 @@ function naturalJoin(list) {
   if (list.length === 1) return list[0];
   const head = list.slice(0, -1).join(", ");
   return head + " e " + list[list.length - 1];
+}
+
+/* ------------------- LLM ORCHESTRATION ------------------- */
+
+/**
+ * Chiediamo al modello di:
+ * - aggiornare lo stato wizard (budget, countryCode, weeks, goal, city)
+ * - decidere l'azione: ask_more | ready_to_compare | off_topic
+ * - generare la risposta naturale da mostrare all'utente (reply)
+ *
+ * Il tutto in JSON, forzato.
+ */
+async function runWizardControllerLLM({ wizard, message }) {
+  const sysPrompt = `
+Sei il cervello di "Edovia AI", un assistente che aiuta studenti e famiglie a confrontare programmi di studio all'estero.
+
+NON stai parlando direttamente con l'utente: rispondi SEMPRE e SOLO in JSON.
+Il backend userà il campo "reply" per mostrare il testo all'utente.
+
+Regole:
+- Lingua: SEMPRE italiano.
+- Obiettivo: guidare l'utente a definire 4 elementi per la comparazione:
+  1) budget totale (corso + alloggio), in euro
+  2) Paese (usa, canada...) come countryCode tra quelli disponibili
+  3) durata in settimane
+  4) obiettivo del viaggio (goal), testo libero
+  opzionale: città preferita (city), come testo libero
+- Parti dallo stato "wizard" che ti viene passato (può avere già alcuni campi pieni).
+- Aggiorna o aggiungi SOLO i campi che l'utente esplicita in modo chiaro nel nuovo messaggio.
+- Se l'utente cambia idea su budget/destinazione/durata/goal, puoi sovrascrivere il valore precedente.
+
+Paesi disponibili per la comparazione:
+${availableCountries.join(", ") || "(nessuno – ma di solito us, canada)"}
+
+Comportamento:
+- "action": 
+  - "ask_more" → manca ancora almeno uno tra budget, countryCode, weeks, goal.
+  - "ready_to_compare" → hai TUTTI: budget, countryCode, weeks, goal (city è opzionale).
+  - "off_topic" → il messaggio è soprattutto fuori tema (es. ricette, videogiochi, politica).
+- "reply":
+  - se ask_more:
+    - spiega in modo breve cosa hai capito finora (budget/destinazione/durata/goal/città).
+    - chiedi in modo naturale SOLO le informazioni che mancano, una o due alla volta.
+    - tono amichevole, concreto, da consulente, non da chatbot.
+  - se ready_to_compare:
+    - riassumi rapidamente i parametri (budget, durata, Paese, eventuale città, goal).
+    - NON inventare scuole, città o prezzi.
+    - di' che ora mostrerai le opzioni migliori tra le scuole partner Edovia.
+  - se off_topic:
+    - rispondi con una frase breve e gentile dicendo che Edovia AI si occupa solo di programmi di studio all'estero.
+    - invita l'utente a dirti budget, Paese e durata.
+- Se l'utente chiede destinazioni che non sono nei Paesi disponibili (es. Francia, Giappone, Luna, Marte):
+  - se è una destinazione reale ma non supportata (Francia, Spagna...):
+    - "action" = "ask_more"
+    - spiega che al momento Edovia confronta solo i Paesi disponibili (es. USA e Canada)
+    - proponi di lavorare su uno di quelli.
+    - non impostare countryCode.
+  - se dice cose impossibili tipo "sulla luna", "su Marte":
+    - puoi ironizzare in modo leggero (1 frase), ma poi riportalo gentilmente su mete reali e supportate.
+- Goal:
+  - qualsiasi frase che esprima motivazioni, desideri, obiettivi personali o accademici va bene come goal.
+  - non serve sia "pulita": può essere anche una frase lunga dell'utente.
+- Budget:
+  - interpreta numeri come importi in euro (es. 7000, 7k, 7.000).
+  - se dice "non ho budget" o simile, non impostare il budget e chiedilo in modo morbido.
+- Durata:
+  - "un anno" ≈ 48 settimane, "un semestre" ≈ 24, "un'estate" ≈ 12.
+  - se dice "6 mesi" ≈ 24 settimane.
+- Paesi:
+  - se dice "Stati Uniti", "America", "USA" → countryCode "us".
+  - se dice "Canada" → countryCode "canada".
+- Città:
+  - se nomina una città (es. New York, San Diego, Toronto), copiala così come city (senza interpretare altro).
+  - NON cambiare countryCode in base alla città se nel wizard c'è già un Paese coerente (usa o canada).
+    Se il Paese non è ancora impostato e la città è ovviamente in uno dei Paesi disponibili, puoi impostare il Paese.
+
+Struttura di output richiesta (obbligatoria):
+{
+  "updatedWizard": {
+    "budget": number | null,
+    "countryCode": string | null,
+    "weeks": number | null,
+    "goal": string | null,
+    "city": string | null
+  },
+  "action": "ask_more" | "ready_to_compare" | "off_topic",
+  "reply": "testo in italiano da mostrare all'utente"
+}
+
+Rispetta ESATTAMENTE questa struttura e usa SEMPRE JSON valido.
+`;
+
+  const userPayload = {
+    wizard,
+    message
+  };
+
+  const completion = await client.chat.completions.create({
+    model: "gpt-4.1-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: sysPrompt
+      },
+      {
+        role: "user",
+        content: JSON.stringify(userPayload)
+      }
+    ]
+  });
+
+  let parsed;
+  try {
+    parsed = JSON.parse(completion.choices?.[0]?.message?.content || "{}");
+  } catch (err) {
+    console.error("Errore nel parsing JSON del controller LLM:", err.message);
+    parsed = null;
+  }
+
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    !parsed.updatedWizard ||
+    !parsed.action
+  ) {
+    return {
+      updatedWizard: wizard,
+      action: "ask_more",
+      reply:
+        "C'è stato un piccolo problema tecnico nell'elaborazione. Riproviamo: dimmi budget totale, Paese e durata, così ti mostro i programmi compatibili."
+    };
+  }
+
+  return parsed;
 }
 
 /* ------------------------- ROUTE CHAT ------------------------- */
@@ -243,7 +226,7 @@ app.post("/chat", async (req, res) => {
 
     let session = sessions.get(sessionId);
     if (!session) {
-      session = { count: 0, wizard: { started: false } };
+      session = { count: 0, wizard: {} };
       sessions.set(sessionId, session);
     }
 
@@ -259,116 +242,78 @@ app.post("/chat", async (req, res) => {
     session.count += 1;
 
     const text = String(message || "").trim();
-    const wizard = session.wizard || (session.wizard = { started: false });
+    const wizard = session.wizard || (session.wizard = {});
 
-    // auto-parsing parametri dal testo corrente
-    const detectedBudget = parseBudget(text);
-    const detectedCountry = parseCountryCode(text);
-    const detectedWeeks = parseWeeks(text);
-    const detectedGoal = parseGoal(text);
+    // 1) chiediamo al modello di aggiornare lo stato e decidere l'azione
+    const control = await runWizardControllerLLM({ wizard, message: text });
 
-    if (detectedBudget && !wizard.budget) wizard.budget = detectedBudget;
-    if (detectedCountry && !wizard.countryCode) wizard.countryCode = detectedCountry;
-    if (detectedWeeks && !wizard.weeks) wizard.weeks = detectedWeeks;
-    if (detectedGoal && !wizard.goal) wizard.goal = detectedGoal;
+    // aggiorna lo stato wizard con quanto restituito dal modello
+    session.wizard = {
+      ...wizard,
+      ...(control.updatedWizard || {})
+    };
 
-    const wizardActive =
-      wizard.budget || wizard.countryCode || wizard.weeks || wizard.goal;
+    const updated = session.wizard;
+    const action = control.action;
+    const llmReply = control.reply || "";
 
-    // se non stiamo facendo il wizard e il messaggio non parla di programmi -> LLM generico
-    if (!wizardActive && !isProgramIntent(text)) {
-      const systemPrompt =
-        "Sei Edovia AI, un assistente che spiega come funziona un comparatore AI di programmi di studio all'estero. Rispondi in modo chiaro, breve e concreto, sempre in italiano. Quando l'utente parla di budget, Paesi o programmi, guidalo verso la comparazione con tono amichevole. Non usare markdown o asterischi, solo testo semplice con a capo.";
+    // 2) gestiamo le azioni
 
-      const completion = await client.chat.completions.create({
-        model: "gpt-4.1-mini",
-        messages: [
-          {
-            role: "system",
-            content: systemPrompt
-          },
-          { role: "user", content: text }
-        ]
+    // off-topic: mostriamo solo il reply del modello
+    if (action === "off_topic") {
+      return res.json({
+        type: "ok",
+        reply: llmReply
+      });
+    }
+
+    // ask_more: ancora dati mancanti, mostriamo solo il reply del modello
+    if (action === "ask_more") {
+      return res.json({
+        type: "ok",
+        reply: llmReply
+      });
+    }
+
+    // ready_to_compare: abbiamo tutti i dati per la comparazione
+    if (action === "ready_to_compare") {
+      const { budget, countryCode, weeks, goal, city } = updated;
+
+      if (!budget || !countryCode || !weeks || !goal) {
+        // in teoria non dovrebbe succedere, ma mettiamo una guardia
+        const fallbackReply =
+          "Ho quasi tutte le informazioni, ma me ne manca ancora qualcuna tra budget, Paese, durata e obiettivo. Dimmi in una frase chiara: budget totale, Paese (es. USA/Canada) e per quanto tempo vorresti restare.";
+        return res.json({ type: "ok", reply: fallbackReply });
+      }
+
+      const programs = comparePrograms({
+        countryCode,
+        budget,
+        weeks
       });
 
-      let reply =
-        completion.choices?.[0]?.message?.content ||
-        "C'è stato un problema, riprova tra poco.";
+      const countryLabel = countryCode === "us" ? "USA" : countryCode;
+      const flag =
+        countryCode === "us"
+          ? "🇺🇸"
+          : countryCode === "canada"
+          ? "🇨🇦"
+          : "🌍";
 
-      // rimozione eventuali asterischi residui
-      reply = reply.replace(/\*/g, "");
-
-      return res.json({ type: "ok", reply });
-    }
-
-    // da qui in poi: flusso wizard
-
-    wizard.started = true;
-
-    const missingBudget = !wizard.budget;
-    const missingCountry = !wizard.countryCode;
-    const missingWeeks = !wizard.weeks;
-    const missingGoal = !wizard.goal;
-
-    // se manca almeno un parametro -> chiedi solo ciò che manca, in modo conversazionale
-    if (missingBudget || missingCountry || missingWeeks || missingGoal) {
-      const knownParts = [];
-
-      if (wizard.countryCode) {
-        const l = wizard.countryCode === "us" ? "USA" : "Canada";
-        knownParts.push(`destinazione: ${l}`);
-      }
-      if (wizard.weeks) {
-        knownParts.push(`durata: circa ${wizard.weeks} settimane`);
-      }
-      if (wizard.budget) {
-        knownParts.push(`budget indicativo: circa €${wizard.budget}`);
-      }
-      if (wizard.goal) {
-        knownParts.push(`obiettivo: ${wizard.goal}`);
+      if (!programs.length) {
+        const noProgReply =
+          llmReply +
+          "\n\n" +
+          "Per la combinazione che hai indicato non trovo programmi compatibili tra i partner disponibili. Possiamo provare a:\n" +
+          "• Aumentare un po’ il budget\n" +
+          "• Ridurre la durata\n" +
+          "• Oppure considerare un altro Paese tra quelli disponibili\n\n" +
+          "Dimmi tu cosa preferisci cambiare e rifacciamo il confronto.";
+        // non resetto il wizard, così l'utente può correggere un solo parametro
+        return res.json({ type: "ok", reply: noProgReply });
       }
 
-      let intro = "";
-      if (knownParts.length) {
-        intro = "Perfetto, ho già queste info: " + naturalJoin(knownParts) + ".\n\n";
-      } else {
-        intro =
-          "Ok, ti aiuto a capire quali programmi sono davvero alla tua portata.\nTi faccio solo qualche domanda veloce.\n\n";
-      }
-
-      let question = "";
-
-      if (missingBudget) {
-        question =
-          "Partiamo dal budget totale per corso + alloggio. Quanto pensavi di spendere in tutto? Puoi scrivere ad esempio: 8000 euro, 10000, 12000.";
-      } else if (missingCountry) {
-        question =
-          "Ora la destinazione: dove ti piacerebbe andare? Puoi scrivere il Paese (USA, Canada) o anche una città come San Diego o Toronto.";
-      } else if (missingWeeks) {
-        question =
-          "Per quanto tempo vorresti restare? Puoi scrivere 'estate', 'un semestre', 'un anno' oppure indicare settimane o mesi (es. 24 settimane, 6 mesi).";
-      } else if (missingGoal) {
-        question =
-          "Ultima cosa: qual è il motivo principale per cui vuoi partire? Ad esempio: esperienza culturale, migliorare l’inglese, fare networking, preparare esami o altro.";
-      }
-
-      const reply = intro + question;
-      return res.json({ type: "ok", reply });
-    }
-
-    // abbiamo budget + countryCode + weeks + goal: facciamo la comparazione
-
-    const countryCode = wizard.countryCode;
-    const countryLabel = countryCode === "us" ? "USA" : "Canada";
-    const flag = countryCode === "us" ? "🇺🇸" : "🇨🇦";
-
-    const programs = comparePrograms({
-      countryCode,
-      budget: wizard.budget,
-      weeks: wizard.weeks
-    });
-
-    if (programs.length) {
+      // helper per punteggio match
       function matchScore(total, budget) {
         const diff = total - budget;
         if (diff <= 0) return 5.0;
@@ -430,8 +375,23 @@ app.post("/chat", async (req, res) => {
         return result;
       }
 
+      // verifica se abbiamo partner esattamente nella città richiesta
+      let cityNote = "";
+      if (city) {
+        const requestedCityLower = city.toLowerCase();
+        const partnersForCountry = loadPartners(countryCode);
+        const hasExactCity = partnersForCountry.some(
+          (p) => (p.city || "").toLowerCase() === requestedCityLower
+        );
+        if (!hasExactCity) {
+          cityNote =
+            `Nota: al momento non abbiamo partner diretti a ${city}, ` +
+            `quindi ti mostro le opzioni più vicine per esperienza e qualità in ${countryLabel}.\n\n`;
+        }
+      }
+
       const cards = programs.slice(0, 3).map((p, index) => {
-        const score = matchScore(p.total, wizard.budget);
+        const score = matchScore(p.total, budget);
         const tags = badgeArray(p, score);
 
         const lines = [
@@ -442,7 +402,7 @@ app.post("/chat", async (req, res) => {
           "",
           `Scuola: ${p.name}`,
           `Città: ${p.city}`,
-          `Durata stimata: ${wizard.weeks} settimane`,
+          `Durata stimata: ${weeks} settimane`,
           "",
           `Totale stimato: €${Math.round(p.total)}`,
           `  • Corso: €${Math.round(p.tuition)}`,
@@ -460,17 +420,19 @@ app.post("/chat", async (req, res) => {
       });
 
       const header =
-        `Ho elaborato il tuo profilo (budget circa €${wizard.budget}, durata ${wizard.weeks} settimane in ${countryLabel}, obiettivo: "${wizard.goal.trim()}").\n` +
+        llmReply.trim() +
+        "\n\n" +
+        cityNote +
         "Ecco alcune opzioni da cui partire:\n\n" +
         "────────────────────────────────────────\n\n";
 
       const cta =
-        "Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, crea un account Edovia [[CREA_UN_ACCOUNT]]";
+        "Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, crea il tuo account Edovia [[CREA_UN_ACCOUNT]]";
 
       const reply = header + cards.join("\n\n") + "\n\n" + cta;
 
       // reset wizard per eventuale nuova ricerca
-      session.wizard = { started: false };
+      session.wizard = {};
 
       return res.json({
         type: "ok",
@@ -478,12 +440,9 @@ app.post("/chat", async (req, res) => {
       });
     }
 
+    // fallback di sicurezza
     const fallbackReply =
-      "Per i parametri che hai inserito non trovo partner compatibili nei Paesi selezionati. Possiamo provare a:\n" +
-      "• Aumentare un po’ il budget\n" +
-      "• Ridurre la durata\n" +
-      "• Valutare un altro Paese (ad esempio Canada invece di USA)\n\n" +
-      "Dimmi cosa preferisci modificare e rifacciamo il confronto.";
+      "Ho bisogno di qualche informazione in più per aiutarti bene. Dimmi in una frase: budget indicativo, Paese (es. USA/Canada) e per quanto tempo vorresti restare.";
     return res.json({ type: "ok", reply: fallbackReply });
   } catch (err) {
     console.error("Errore /chat:", err);
