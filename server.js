@@ -18,7 +18,7 @@ const client = new OpenAI({
 app.use(cors());
 app.use(express.json());
 
-// sessione: { count, wizard: { budget, countryCode, weeks, goal } }
+// sessione: { count, wizard: { started, budget, countryCode, weeks, goal } }
 const sessions = new Map();
 const MAX_MESSAGES_FREE = 20;
 
@@ -71,7 +71,6 @@ function parseBudget(text) {
     lower.includes("€") ||
     lower.includes("euro") ||
     lower.includes(" eur") ||
-    lower.includes(" eur ") ||
     lower.includes(" k") || // es. "10k"
     lower.includes(" mila"); // es. "10 mila"
 
@@ -81,7 +80,7 @@ function parseBudget(text) {
   const value = parseInt(match[0].replace(/[^\d]/g, ""), 10);
   if (isNaN(value)) return null;
 
-  // Se non c'è contesto monetario, escludo numeri piccoli (tipicamente durate: 1, 3, 6, 12...)
+  // Se non c'è contesto monetario, escludo numeri piccoli (tipicamente durate)
   if (!hasCurrency && value < 100) {
     return null;
   }
@@ -155,22 +154,54 @@ function parseWeeks(text) {
 }
 
 /**
- * Riconosce se il messaggio dell'utente parla di programmi/viaggi
- * (serve per decidere se usare il wizard o l'LLM generico).
+ * Riconosce un "goal" di massima dal testo:
+ * esperienza culturale, crescita personale, lavoro, università, esami, ecc.
+ */
+function parseGoal(text) {
+  const lower = text.toLowerCase();
+
+  if (
+    lower.includes("cultur") ||
+    lower.includes("cresc") ||
+    lower.includes("personal") ||
+    lower.includes("univers") ||
+    lower.includes("lavor") ||
+    lower.includes("inglese") ||
+    lower.includes("toefl") ||
+    lower.includes("ielts") ||
+    lower.includes("accadem")
+  ) {
+    return text.trim();
+  }
+
+  return null;
+}
+
+/**
+ * Riconosce se il messaggio dell'utente parla di programmi/viaggi.
  */
 function isProgramIntent(text) {
   const lower = text.toLowerCase();
   return (
     lower.includes("usa") ||
     lower.includes("canada") ||
-    lower.includes("exchange") ||
     lower.includes("all'estero") ||
+    lower.includes("anno") ||
+    lower.includes("semestre") ||
+    lower.includes("exchange") ||
     lower.includes("programma") ||
     lower.includes("programmi") ||
-    lower.includes("semestre") ||
-    lower.includes("anno") ||
     parseBudget(text) !== null
   );
+}
+
+/* ------------------- UTIL ------------------- */
+
+function naturalJoin(list) {
+  if (!list.length) return "";
+  if (list.length === 1) return list[0];
+  const head = list.slice(0, -1).join(", ");
+  return head + " e " + list[list.length - 1];
 }
 
 /* ------------------------- ROUTE CHAT ------------------------- */
@@ -187,13 +218,13 @@ app.post("/chat", async (req, res) => {
 
     let session = sessions.get(sessionId);
     if (!session) {
-      session = { count: 0, wizard: {} };
+      session = { count: 0, wizard: { started: false } };
       sessions.set(sessionId, session);
     }
 
     if (session.count >= MAX_MESSAGES_FREE) {
       const reply =
-        "Hai usato tutte le domande gratuite per esplorare i programmi. Per salvare questa comparazione e continuare senza limiti, [[CREA_UN_ACCOUNT]].";
+        "Hai usato tutte le domande gratuite per esplorare i programmi. Per salvare questa comparazione e continuare senza limiti, [[CREA_UN_ACCOUNT]]";
       return res.json({
         type: "limit_reached",
         reply,
@@ -203,33 +234,18 @@ app.post("/chat", async (req, res) => {
     session.count += 1;
 
     const text = String(message || "").trim();
-    const wizard = session.wizard || (session.wizard = {});
+    const wizard = session.wizard || (session.wizard = { started: false });
 
     // auto-parsing parametri dal testo corrente
     const detectedBudget = parseBudget(text);
-    if (detectedBudget && !wizard.budget) wizard.budget = detectedBudget;
-
     const detectedCountry = parseCountryCode(text);
-    if (detectedCountry && !wizard.countryCode) {
-      wizard.countryCode = detectedCountry;
-    }
-
     const detectedWeeks = parseWeeks(text);
-    if (detectedWeeks && !wizard.weeks) wizard.weeks = detectedWeeks;
+    const detectedGoal = parseGoal(text);
 
-    // se abbiamo già tutto tranne goal, e questo messaggio non è stato interpretato
-    // come budget/paese/durata -> trattalo come goal
-    if (
-      wizard.budget &&
-      wizard.countryCode &&
-      wizard.weeks &&
-      !wizard.goal &&
-      !detectedBudget &&
-      !detectedCountry &&
-      !detectedWeeks
-    ) {
-      wizard.goal = text;
-    }
+    if (detectedBudget && !wizard.budget) wizard.budget = detectedBudget;
+    if (detectedCountry && !wizard.countryCode) wizard.countryCode = detectedCountry;
+    if (detectedWeeks && !wizard.weeks) wizard.weeks = detectedWeeks;
+    if (detectedGoal && !wizard.goal) wizard.goal = detectedGoal;
 
     const wizardActive =
       wizard.budget || wizard.countryCode || wizard.weeks || wizard.goal;
@@ -260,32 +276,63 @@ app.post("/chat", async (req, res) => {
       return res.json({ type: "ok", reply });
     }
 
-    /* --------- WIZARD: budget -> paese -> durata -> obiettivo --------- */
+    // da qui in poi: flusso wizard
 
-    if (!wizard.budget) {
-      const reply =
-        "Perfetto, ti aiuto a confrontare i programmi all’estero.\n\nPer farlo mi servono 4 informazioni:\n1. Il budget totale (corso + alloggio)\n2. Il Paese che preferisci\n3. La durata (es. estate, semestre, anno)\n4. Il tuo obiettivo principale per il viaggio\n\nPartiamo dal budget: quanto puoi spendere in totale? 💶\nEsempio: 8000, 10000 euro, 12000...";
+    wizard.started = true;
+
+    const missingBudget = !wizard.budget;
+    const missingCountry = !wizard.countryCode;
+    const missingWeeks = !wizard.weeks;
+    const missingGoal = !wizard.goal;
+
+    // se manca almeno un parametro -> chiedi solo ciò che manca, in modo conversazionale
+    if (missingBudget || missingCountry || missingWeeks || missingGoal) {
+      const knownParts = [];
+
+      if (wizard.countryCode) {
+        const l = wizard.countryCode === "us" ? "USA" : "Canada";
+        knownParts.push(`destinazione: ${l}`);
+      }
+      if (wizard.weeks) {
+        knownParts.push(`durata: circa ${wizard.weeks} settimane`);
+      }
+      if (wizard.budget) {
+        knownParts.push(`budget indicativo: circa €${wizard.budget}`);
+      }
+      if (wizard.goal) {
+        knownParts.push(`obiettivo: ${wizard.goal}`);
+      }
+
+      let intro = "";
+      if (knownParts.length) {
+        intro = "Ok, finora ho capito " + naturalJoin(knownParts) + ".\n\n";
+      } else {
+        intro =
+          "Perfetto, ti aiuto a confrontare i programmi all’estero.\nPuoi rispondere anche in modo libero, ad esempio: \"Ho 9000 euro per un anno negli USA per fare un’esperienza culturale\".\n\n";
+      }
+
+      let question = "";
+
+      if (missingBudget) {
+        question =
+          "Partiamo dal budget totale che hai a disposizione per corso + alloggio. Quanto puoi spendere in totale? Puoi scrivere, ad esempio: 8000 euro, 10000, 12000...";
+      } else if (missingCountry) {
+        question =
+          "Ora scegli il Paese di destinazione che vuoi confrontare: ad esempio USA oppure Canada. Se hai già in mente una città (es. Boston, San Diego, Toronto), puoi scriverla.";
+      } else if (missingWeeks) {
+        question =
+          "Che durata hai in mente? Puoi rispondere in settimane oppure scrivere: estate, semestre, anno. Ad esempio: 24 settimane, 3 mesi, un anno intero.";
+      } else if (missingGoal) {
+        question =
+          "Ultimo passo: qual è il tuo obiettivo principale per questo periodo all’estero? Puoi scrivere in modo libero, ad esempio: esperienza culturale e di crescita personale, migliorare l’inglese per l’università, preparare esami come IELTS o TOEFL, capire se potrei trasferirmi in quel Paese.";
+      }
+
+      const reply = intro + question;
       return res.json({ type: "ok", reply });
     }
 
-    if (!wizard.countryCode) {
-      const reply = `Ok, budget indicativo: circa €${wizard.budget}.\n\nOra scegli la destinazione principale che vuoi confrontare:\n\n• USA (città come Boston, New York, Los Angeles, San Diego)\n• Canada (Toronto, Vancouver, ecc.)\n\nScrivi ad esempio: USA oppure Canada.`;
-      return res.json({ type: "ok", reply });
-    }
+    // abbiamo budget + countryCode + weeks + goal: facciamo la comparazione
 
-    if (!wizard.weeks) {
-      const reply =
-        "Perfetto. Che durata hai in mente? ⏱️\n\nPuoi rispondere in settimane oppure scegliere una di queste opzioni:\n• Estate: 8–12 settimane\n• Semestre: 24 settimane\n• Anno: 48 settimane\n\nAd esempio: 24 settimane, semestre, 3 mesi, anno intero.";
-      return res.json({ type: "ok", reply });
-    }
-
-    if (!wizard.goal) {
-      const reply =
-        "Ultimo passo: qual è il tuo obiettivo principale per questo periodo all’estero? 🎯\n\nPuoi scrivere in modo libero, oppure ispirarti a questi esempi:\n• Migliorare l’inglese per università o lavoro\n• Fare un’esperienza culturale e di crescita personale\n• Preparare esami come IELTS o TOEFL\n• Capire se in futuro potrei trasferirmi in quel Paese\n\nScrivi in una frase cosa ti aspetti dal viaggio.";
-      return res.json({ type: "ok", reply });
-    }
-
-    // abbiamo budget + countryCode + weeks + goal
     const countryCode = wizard.countryCode;
     const countryLabel = countryCode === "us" ? "USA" : "Canada";
     const flag = countryCode === "us" ? "🇺🇸" : "🇨🇦";
@@ -390,7 +437,7 @@ app.post("/chat", async (req, res) => {
       const header = `In base al tuo obiettivo "${wizard.goal.trim()}", al budget di circa €${wizard.budget} e alla durata di ${wizard.weeks} settimane in ${countryLabel}, ecco le principali opzioni che Edovia ha trovato per te:\n\n`;
 
       const cta =
-        "Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, [[CREA_UN_ACCOUNT]].";
+        "Per vedere i dettagli completi, salvare la comparazione e procedere con l'application, [[CREA_UN_ACCOUNT]]";
 
       const reply =
         header +
@@ -400,7 +447,7 @@ app.post("/chat", async (req, res) => {
         cta;
 
       // reset wizard per eventuale nuova ricerca
-      session.wizard = {};
+      session.wizard = { started: false };
 
       return res.json({
         type: "ok",
